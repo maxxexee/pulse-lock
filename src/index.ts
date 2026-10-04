@@ -59,6 +59,8 @@ async function main(): Promise<void> {
     grpc = startGrpc({
       endpoint: config.grpcEndpoint,
       token: config.grpcToken,
+      // deep-dive evidence: filtered Yellowstone txs feed on-chain confirmation
+      onTransaction: (accounts, signature) => registry.onChain(accounts, signature, Date.now()),
       autoReconnect: true,
     })
   }
@@ -107,6 +109,21 @@ async function main(): Promise<void> {
         deepDive.add(r.key)
         grpc.setTxAccounts([...deepDive])
       }
+    }
+    // Deep-dive evidence in action: a pool keeps its filtered subscription only
+    // while it stays hot OR keeps producing confirmed on-chain txs. Quiet pools
+    // are released so the 5 filter slots follow real activity, not history.
+    if (grpc && grpc.stats().connected) {
+      const byKey = new Map(rows.map((r) => [r.key, r]))
+      let changed = false
+      for (const k of [...deepDive]) {
+        const r = byKey.get(k)
+        if (!r || (r.chainTx60 === 0 && r.score.total < config.deepDiveThreshold)) {
+          deepDive.delete(k)
+          changed = true
+        }
+      }
+      if (changed) grpc.setTxAccounts([...deepDive])
     }
     // live PnL on fired alerts: last known swap price vs price at the call
     for (const a of alerter.list) {

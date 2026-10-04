@@ -18,12 +18,19 @@ export interface SwapRec {
 
 export interface LiqRec {
   t: number
+  /** signed: adds positive, removes negative — liquidity moves both ways */
   usd: number
 }
 
 export interface TraderRec {
   t: number
   addr: string
+}
+
+/** A confirmed on-chain transaction touching a pool (deep-dive gRPC evidence). */
+export interface ChainRec {
+  t: number
+  sig: string
 }
 
 export interface PoolState {
@@ -42,6 +49,8 @@ export interface PoolState {
   swaps: SwapRec[]
   liqAdds: LiqRec[]
   traderRecs: TraderRec[]
+  /** confirmed on-chain txs seen on the deep-dive gRPC stream for this pool */
+  chainRecs: ChainRec[]
   lastSwapAt: number // ms, for alert latency
 }
 
@@ -58,6 +67,9 @@ export interface PoolRow {
   buyRatio: number
   trades60: number
   liqAdded60: number
+  liqRemoved60: number
+  /** on-chain txs confirmed via the deep-dive gRPC stream in the last 60s */
+  chainTx60: number
   progressPct: number | null
   score: Score
   state: PoolStateName
@@ -123,6 +135,7 @@ export class Registry {
         swaps: [],
         liqAdds: [],
         traderRecs: [],
+        chainRecs: [],
         lastSwapAt: 0,
       }
       this.pools.set(key, p)
@@ -156,6 +169,30 @@ export class Registry {
       this.mintIndex.set(mint, set)
     }
     set.add(key)
+  }
+
+  /** Deep-dive evidence: attribute a confirmed on-chain tx to every tracked pool
+   *  whose address or mint appears in it. This is what the filtered Yellowstone
+   *  transaction stream actually feeds — the on-chain confirmation signal. */
+  onChain(accounts: string[], sig: string, now: number): void {
+    if (accounts.length === 0) return
+    const touched = new Set<PoolState>()
+    for (const a of accounts) {
+      const direct = this.pools.get(a)
+      if (direct) touched.add(direct)
+      const byMint = this.mintIndex.get(a)
+      if (byMint) {
+        for (const k of byMint) {
+          const q = this.pools.get(k)
+          if (q) touched.add(q)
+        }
+      }
+    }
+    for (const p of touched) {
+      if (!p.chainRecs) p.chainRecs = []
+      p.chainRecs.push({ t: now, sig })
+      if (p.chainRecs.length > MAX_LEN) p.chainRecs.shift()
+    }
   }
 
   private byMint(mint: unknown): PoolState[] {
@@ -225,7 +262,6 @@ export class Registry {
       }
 
       case 'liquidity': {
-        if (e.kind === 'remove') break
         const mint = e.mint ?? e.base_mint
         let p: PoolState | undefined
         const key = String(e.pool ?? '')
@@ -236,8 +272,14 @@ export class Registry {
         }
         if (p) {
           const usd = num(e.volume_usd) || num(e.usd) || num(e.quote_amount_usd)
-          p.liqAdds.push({ t: now, usd })
+          const out = e.kind === 'remove'
+          // signed: adds positive, removes negative — liquidity in AND out
+          p.liqAdds.push({ t: now, usd: out ? -usd : usd })
           if (p.liqAdds.length > MAX_LEN) p.liqAdds.shift()
+          // keep the live LIQ reading moving both ways between token_update snapshots
+          if (usd > 0 && p.liqUsd != null) {
+            p.liqUsd = out ? Math.max(0, p.liqUsd - usd) : p.liqUsd + usd
+          }
         }
         break
       }
@@ -304,6 +346,8 @@ export class Registry {
     while (p.swaps.length && p.swaps[0].t < cut) p.swaps.shift()
     while (p.liqAdds.length && p.liqAdds[0].t < cut) p.liqAdds.shift()
     while (p.traderRecs.length && p.traderRecs[0].t < cut) p.traderRecs.shift()
+    if (!p.chainRecs) p.chainRecs = []
+    while (p.chainRecs.length && p.chainRecs[0].t < cut) p.chainRecs.shift()
   }
 
   rows(): PoolRow[] {
@@ -334,7 +378,14 @@ export class Registry {
       }
 
       let liqAdded60 = 0
-      for (const l of p.liqAdds) liqAdded60 += l.usd
+      let liqRemoved60 = 0
+      for (const l of p.liqAdds) {
+        if (l.usd >= 0) liqAdded60 += l.usd
+        else liqRemoved60 -= l.usd
+      }
+
+      let chainTx60 = 0
+      for (const c of p.chainRecs ?? []) if (now - c.t <= 60_000) chainTx60++
 
       const buyRatio = vol60 > 0 ? buyVol60 / vol60 : trades60 > 0 ? buys / trades60 : 0
 
@@ -369,6 +420,8 @@ export class Registry {
         buyRatio,
         trades60,
         liqAdded60,
+        liqRemoved60,
+        chainTx60,
         progressPct: p.progressPct,
         score,
         state: stateFor(score.total, config.alertThreshold),
@@ -399,6 +452,7 @@ export class Registry {
       if (!existsSync('data/state.json')) return
       const raw = JSON.parse(readFileSync('data/state.json', 'utf8')) as { pools?: PoolState[] }
       for (const p of raw.pools ?? []) {
+        if (!p.chainRecs) p.chainRecs = []
         this.pools.set(p.pool, p)
         if (p.mint) this.indexMint(p.mint, p.pool)
       }

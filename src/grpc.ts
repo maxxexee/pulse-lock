@@ -11,6 +11,24 @@ import type { ClientDuplexStream, SubscribeRequest, SubscribeUpdate } from '@tri
  * replays whatever we missed — slot replay closes the gap, zero missed pools.
  */
 
+/** Minimal base58 (Bitcoin alphabet) — decode Solana pubkeys/signatures from the
+ *  raw bytes the firehose hands us, no dependency. */
+const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+function b58(bytes: Uint8Array): string {
+  let n = 0n
+  for (const b of bytes) n = n * 256n + BigInt(b)
+  let out = ''
+  while (n > 0n) {
+    out = B58[Number(n % 58n)] + out
+    n /= 58n
+  }
+  for (const b of bytes) {
+    if (b === 0) out = '1' + out
+    else break
+  }
+  return out || '1'
+}
+
 const ClientCtor: new (
   endpoint: string,
   xToken?: string,
@@ -54,6 +72,8 @@ export interface GrpcOpts {
   endpoint: string
   token: string
   onSlot?: (slot: number) => void
+  /** decoded deep-dive transaction: account keys + signature, base58 */
+  onTransaction?: (accounts: string[], signature: string) => void
   autoReconnect?: boolean
 }
 
@@ -138,6 +158,21 @@ export function startGrpc(opts: GrpcOpts): GrpcHandle {
     }
     if (upd.transaction) {
       st.txUpdates++
+      // Deep-dive evidence: decode the filtered transaction (signature + account
+      // keys) and hand it to the engine, which attributes it to the pools it
+      // touches. Best-effort — a malformed frame never throws into the stream.
+      try {
+        const info = upd.transaction.transaction
+        const keys = info?.transaction?.message?.accountKeys
+        if (keys && keys.length) {
+          const accounts: string[] = []
+          for (const k of keys) accounts.push(b58(k))
+          const signature = info?.signature && info.signature.length ? b58(info.signature) : ''
+          opts.onTransaction?.(accounts, signature)
+        }
+      } catch {
+        /* malformed tx frame — ignore, keep the stream alive */
+      }
       return
     }
     // Server keepalive: empty ping every ~15s. Reply with a full
