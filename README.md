@@ -60,7 +60,7 @@ part we're proudest of. [Details below.](#how-it-works)
 Prereq: **Node ≥ 24** (PulseLock executes TypeScript natively, no build step).
 
 ```bash
-git clone <this-repo> && cd pulselock
+git clone https://github.com/geekman58748/pulse-lock.git && cd pulse-lock
 npm install
 cp .env.example .env        # paste your Solami API key
 npm start
@@ -302,7 +302,6 @@ src/
   config.ts    env parsing
 public/        landing page + /app dashboard (vanilla JS, canvas call cards)
 mockup/        original dashboard spec the formatting follows
-PLAN.md        full build plan, cut list, and decision log
 ```
 
 ---

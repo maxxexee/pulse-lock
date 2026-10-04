@@ -5,3 +5,6 @@ data/*.json
 !data/.gitkeep
 *.log
 .DS_Store
+
+# internal sprint journal — private notes, not part of the public submission
+PLAN.md
