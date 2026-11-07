@@ -1,0 +1,6 @@
+# Built dashboard assets. Excluded from language stats so the TypeScript
+# engine is what the repo reports, not the bundled CSS/JS it serves.
+public/** linguist-generated
+
+# Static design mockups, not application code.
+mockup/** linguist-documentation
